@@ -260,6 +260,15 @@ func list(ctx context.Context, browsers browsers) error {
 	}
 	wg.Wait()
 
+	var appWindows = map[string]int{}
+	for workspace := range iterWorkspaces(root) {
+		for _, window := range findWindows(workspace) {
+			if window.AppID != nil {
+				appWindows[*window.AppID]++
+			}
+		}
+	}
+
 	out := bufio.NewWriter(os.Stdout)
 	defer out.Flush()
 
@@ -287,6 +296,9 @@ func list(ctx context.Context, browsers browsers) error {
 					}
 					browserWindow, activeTab, activeTitle, matched = browserTabs, t.id, t.title, i
 				}
+			}
+			if matched < 0 && appWindows[appID] == 1 && len(tabs[appID]) == 1 {
+				browserWindow, matched = tabs[appID][0], 0
 			}
 			if matched >= 0 {
 				tabs[appID] = slices.Delete(tabs[appID], matched, matched+1)
@@ -492,9 +504,14 @@ func (b bruvtabBrowser) activeTab(windowTitle string) string {
 		return ""
 	}
 
+	active := bruvtabParseTabs(body)
+	if len(active) == 1 {
+		return active[0].id
+	}
+
 	var found, foundTitle string
 	var ambiguous bool
-	for _, t := range bruvtabParseTabs(body) {
+	for _, t := range active {
 		if !titleMatches(windowTitle, t.title) {
 			continue
 		}
