@@ -149,12 +149,17 @@ func (b browsers) Set(value string) error {
 }
 
 type location struct {
-	con     int64
-	browser string // the sway app id of the browser the tab is in
-	tab     string
+	con       int64
+	browser   string // the sway app id of the browser the tab is in
+	tab       string
+	workspace string // set for an empty workspace, which has no con to focus
 }
 
 func parseLocation(s string) location {
+	if workspace, ok := strings.CutPrefix(s, "ws:"); ok {
+		return location{workspace: workspace}
+	}
+
 	var loc location
 	con, rest, _ := strings.Cut(s, ":")
 	loc.con, _ = strconv.ParseInt(con, 10, 64)
@@ -163,6 +168,10 @@ func parseLocation(s string) location {
 }
 
 func formatLocation(loc location) string {
+	if loc.workspace != "" {
+		return "ws:" + loc.workspace
+	}
+
 	var con string
 	if loc.con > 0 {
 		con = strconv.FormatInt(loc.con, 10)
@@ -178,7 +187,7 @@ func track(ctx context.Context, browsers browsers) error {
 
 	// sway isn't accepting connections yet when started from its own config
 	return retry(ctx, "subscribe", func() error {
-		return sway.Subscribe(ctx, handlr, sway.EventTypeWindow)
+		return sway.Subscribe(ctx, handlr, sway.EventTypeWindow, sway.EventTypeWorkspace)
 	})
 }
 
@@ -203,15 +212,20 @@ func focus(ctx context.Context, browsers browsers, loc location) error {
 			return fmt.Errorf("focus tab: %w", err)
 		}
 	}
-	if loc.con == 0 {
+	if loc.con == 0 && loc.workspace == "" {
 		return nil
+	}
+
+	var command = fmt.Sprintf("[con_id=%d] focus", loc.con)
+	if loc.workspace != "" {
+		command = fmt.Sprintf("workspace --no-auto-back-and-forth %q", loc.workspace)
 	}
 
 	client, err := sway.New(ctx)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
-	if _, err := client.RunCommand(ctx, fmt.Sprintf("[con_id=%d] focus", loc.con)); err != nil {
+	if _, err := client.RunCommand(ctx, command); err != nil {
 		return fmt.Errorf("run focus: %w", err)
 	}
 	return nil
@@ -371,10 +385,7 @@ func (h *handler) Window(ctx context.Context, e sway.WindowEvent) {
 			}
 		}
 
-		h.history = append(slices.DeleteFunc(h.history, func(l location) bool { return l == current }), current)
-		if len(h.history) > historySize {
-			h.history = h.history[1:]
-		}
+		h.push(current)
 
 	case sway.WindowClose:
 		h.history = slices.DeleteFunc(h.history, func(l location) bool { return l.con == e.Container.ID })
@@ -385,6 +396,24 @@ func (h *handler) Window(ctx context.Context, e sway.WindowEvent) {
 
 	if err := writeBack(h.history); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing back location: %v\n", err)
+	}
+}
+
+func (h *handler) Workspace(ctx context.Context, e sway.WorkspaceEvent) {
+	if e.Change != sway.WorkspaceFocus || e.Current == nil || len(findWindows(e.Current)) > 0 {
+		return
+	}
+
+	h.push(location{workspace: e.Current.Name})
+	if err := writeBack(h.history); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing back location: %v\n", err)
+	}
+}
+
+func (h *handler) push(current location) {
+	h.history = append(slices.DeleteFunc(h.history, func(l location) bool { return l == current }), current)
+	if len(h.history) > historySize {
+		h.history = h.history[1:]
 	}
 }
 
